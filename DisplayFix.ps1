@@ -3,10 +3,11 @@
 #   save       remember the current (correct) layout -> layout.json
 #   restore    put saved positions back (waits for all monitors, re-checks a few times)
 #   swap       emergency: swap the two USB screens' positions
+#   touch      re-point touch screens at their monitors (by USB port; needs admin)
 #   install    auto-run restore on wake / unlock / logon (scheduled task)
 #   uninstall  remove the scheduled task
 param(
-  [ValidateSet('list','save','restore','swap','install','uninstall')][string]$Action = 'list',
+  [ValidateSet('list','save','restore','swap','touch','install','uninstall')][string]$Action = 'list',
   [int]$WaitSec = 60,
   [switch]$Force,
   [string]$UsbMatch = 'RTKF9D'
@@ -114,6 +115,72 @@ function Save-Layout {
   $mons | Select-Object Name, Edid, Port, Path, X, Y | ConvertTo-Json | Set-Content -Path $Cfg -Encoding UTF8
   Write-Log ('saved: ' + (Fmt $mons))
 }
+
+# ---- touch screens ----------------------------------------------------------
+# Windows maps each touch digitizer to a monitor in HKLM ...\Wisp\Pen\Digimon
+# ("20-<digitizer interface path>" = <monitor device path>). When the USB driver
+# renames the monitors on wake, the mapping points at a monitor that no longer
+# exists and that screen stops taking touch. touch.json pairs them by USB port.
+$TouchCfg = Join-Path $Dir 'touch.json'
+$DigiKey  = 'HKLM:\SOFTWARE\Microsoft\Wisp\Pen\Digimon'
+$HidIface = '{4d1e55b2-f16f-11cf-88cb-001111000030}'
+
+function Get-ParentLoc($inst) {
+  try {
+    $parent = (Get-PnpDeviceProperty -InstanceId $inst -KeyName DEVPKEY_Device_Parent -ErrorAction Stop).Data
+    $loc = (Get-PnpDeviceProperty -InstanceId $parent -KeyName DEVPKEY_Device_LocationPaths -ErrorAction Stop).Data
+    if ($loc) { return $loc[0] }
+  } catch {}
+  return ''
+}
+function Get-Touchscreens {
+  $vals = Get-ItemProperty $DigiKey -ErrorAction SilentlyContinue
+  $names = if ($vals) { @($vals.PSObject.Properties | Where-Object { $_.Name -like '*-\\?\HID#*' } | ForEach-Object { $_.Name }) } else { @() }
+  Get-PnpDevice -PresentOnly -Class HIDClass | Where-Object { $_.HardwareID -contains 'HID_DEVICE_UP:000D_U:0004' } | ForEach-Object {
+    $iface = '\\?\' + ($_.InstanceId -replace '\\', '#') + '#' + $HidIface
+    $name = $names | Where-Object { $_.Substring($_.IndexOf('-') + 1) -eq $iface } | Select-Object -First 1
+    $cur = if ($name) { $vals.$name } else { $null }
+    [pscustomobject]@{ Inst = $_.InstanceId; Port = (Get-ParentLoc $_.InstanceId); Name = $name; Iface = $iface; Monitor = $cur }
+  }
+}
+function Is-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+
+# Learn touch port -> monitor port from the current Digimon entries. A stale entry
+# still names the right adapter (the "7&b079922" part survives the rename).
+function Save-Touch {
+  $mons = @(Get-Mons); $pairs = @{}
+  if (Test-Path $TouchCfg) { (Get-Content $TouchCfg -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $pairs[$_.Name] = $_.Value } }
+  foreach ($t in @(Get-Touchscreens)) {
+    if (-not $t.Monitor -or -not $t.Port) { continue }
+    $m = @($mons | Where-Object { $_.Path -eq $t.Monitor })
+    if ($m.Count -ne 1 -and $t.Monitor -match '^\\\\\?\\DISPLAY#[^#]+#(\d+&[0-9a-fA-F]+)&') {
+      $adapter = $Matches[1]
+      $m = @($mons | Where-Object { $_.Path -match ('#' + [regex]::Escape($adapter) + '&') })
+    }
+    if ($m.Count -eq 1 -and $m[0].Port) { $pairs[$t.Port] = $m[0].Port }
+  }
+  if ($pairs.Count) { [pscustomobject]$pairs | ConvertTo-Json | Set-Content -Path $TouchCfg -Encoding UTF8 }
+  Write-Log ("touch pairs: " + (($pairs.GetEnumerator() | ForEach-Object { "$($_.Key) -> $($_.Value)" }) -join ' | '))
+}
+
+function Repair-Touch {
+  if (-not (Test-Path $TouchCfg)) { return }
+  $pairs = Get-Content $TouchCfg -Raw | ConvertFrom-Json
+  $mons = @(Get-Mons); $fixed = @()
+  foreach ($t in @(Get-Touchscreens)) {
+    $want = $pairs.($t.Port)
+    if (-not $want) { continue }
+    $m = @($mons | Where-Object { $_.Port -eq $want })
+    if ($m.Count -ne 1 -or $t.Monitor -eq $m[0].Path) { continue }
+    if (-not (Is-Admin)) { Write-Log "touch on $($t.Port) points at a missing screen - needs admin to fix (run install as admin)"; continue }
+    $name = if ($t.Name) { $t.Name } else { '20-' + $t.Iface }
+    Set-ItemProperty -Path $DigiKey -Name $name -Value $m[0].Path
+    $fixed += $t
+    Write-Log "touch $($t.Inst): $($t.Monitor) -> $($m[0].Path)"
+  }
+  # the digitizer re-reads its screen mapping when it re-arrives
+  foreach ($t in $fixed) { $o = & pnputil.exe /restart-device "$($t.Inst)" 2>&1; Write-Log "restart-device: $(($o | Out-String).Trim() -replace '\s+', ' ')" }
+}
 function Fmt($mons) {
   ($mons | Sort-Object X, Y | ForEach-Object {
     $usb = if ($_.Port -match 'USBROOT\(0\)#(.+)#USBMI') { ' ' + $Matches[1] } else { '' }
@@ -166,7 +233,8 @@ switch ($Action) {
   'list' {
     Get-Mons | Sort-Object X, Y | Format-Table Gdi, Name, Edid, X, Y, W, H, Port, Path -AutoSize | Out-String -Width 400 | Write-Host
   }
-  'save' { Save-Layout }
+  'save' { Save-Layout; Save-Touch }
+  'touch' { Repair-Touch }
   'restore' {
     if (-not (Test-Path $Cfg)) { Write-Log 'no layout.json - run save first'; exit 1 }
     $json = Get-Content $Cfg -Raw | ConvertFrom-Json   # PS 5.1 emits the array as ONE object
@@ -176,11 +244,12 @@ switch ($Action) {
     $deadline = (Get-Date).AddSeconds($WaitSec); $settleUntil = $null; $state = 'wait'
     while ((Get-Date) -lt $deadline) {
       $state = Try-Restore $saved
-      if ($state -ne 'wait' -and -not $settleUntil) { $settleUntil = (Get-Date).AddSeconds(20) }
+      if ($state -ne 'wait' -and -not $settleUntil) { $settleUntil = (Get-Date).AddSeconds(20); Repair-Touch }
       if ($settleUntil -and (Get-Date) -gt $settleUntil) { break }
       Start-Sleep -Seconds 4
     }
     if (-not $settleUntil) { Write-Log ('gave up: monitor set differs from layout.json -> ' + (Fmt (Get-Mons))) }
+    Repair-Touch
   }
   'swap' {
     $usb = @(Get-Mons | Where-Object { $_.Path -match $UsbMatch })
@@ -206,7 +275,9 @@ switch ($Action) {
     $unlock.Enabled = $true; $unlock.StateChange = 8; $unlock.UserId = "$env:USERDOMAIN\$env:USERNAME"
     $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
-    $pr = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+    # Highest = elevated, needed to rewrite the touch mapping in HKLM
+    if (-not (Is-Admin)) { Write-Log 'install needs admin (touch fix writes HKLM) - run it from an admin PowerShell'; exit 1 }
+    $pr = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
     Register-ScheduledTask -TaskName $Task -Action $act -Trigger @($wake, $unlock, $logon) -Settings $set -Principal $pr -Force | Out-Null
     Write-Log "task '$Task' installed (wake + unlock + logon)"
   }
