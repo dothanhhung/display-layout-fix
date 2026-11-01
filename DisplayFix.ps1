@@ -273,13 +273,19 @@ switch ($Action) {
       '</Select></Query></QueryList>'
     $unlock = Get-CimClass -Namespace $ns -ClassName MSFT_TaskSessionStateChangeTrigger | New-CimInstance -ClientOnly
     $unlock.Enabled = $true; $unlock.StateChange = 8; $unlock.UserId = "$env:USERDOMAIN\$env:USERNAME"
+    # device started (screen / touch plugged in). Our own pnputil restart also fires
+    # it; that rerun finds nothing to fix, so it does not loop.
+    $plug = Get-CimClass -Namespace $ns -ClassName MSFT_TaskEventTrigger | New-CimInstance -ClientOnly
+    $plug.Enabled = $true; $plug.Delay = 'PT5S'
+    $plug.Subscription = '<QueryList><Query Id="0" Path="Microsoft-Windows-Kernel-PnP/Configuration"><Select Path="Microsoft-Windows-Kernel-PnP/Configuration">' +
+      '*[System[EventID=410]]</Select></Query></QueryList>'
     $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
     # Highest = elevated, needed to rewrite the touch mapping in HKLM
     if (-not (Is-Admin)) { Write-Log 'install needs admin (touch fix writes HKLM) - run it from an admin PowerShell'; exit 1 }
     $pr = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
-    Register-ScheduledTask -TaskName $Task -Action $act -Trigger @($wake, $unlock, $logon) -Settings $set -Principal $pr -Force | Out-Null
-    Write-Log "task '$Task' installed (wake + unlock + logon)"
+    Register-ScheduledTask -TaskName $Task -Action $act -Trigger @($wake, $unlock, $plug, $logon) -Settings $set -Principal $pr -Force | Out-Null
+    Write-Log "task '$Task' installed (wake + unlock + plug-in + logon)"
   }
   'uninstall' {
     Unregister-ScheduledTask -TaskName $Task -Confirm:$false

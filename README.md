@@ -7,7 +7,8 @@ USB display adapters (DisplayLink, MacroSilicon and similar) often come back fro
 ## What it does
 - `save` remembers the current layout, keyed by each monitor's own hardware ID, not by Windows' `DISPLAYn` number (which USB adapters change on every wake).
 - `restore` waits up to 60 s for every saved monitor to come back, puts each one at its saved position, then keeps checking for another 20 s in case Windows moves them again.
-- `install` runs `restore` hidden whenever the PC wakes (including Modern Standby), you unlock it, or you log on.
+- `install` runs `restore` hidden whenever the PC wakes (including Modern Standby), you unlock it, a device is plugged in (Kernel-PnP event 410), or you log on.
+- Manual one-click fix without a UAC prompt: a shortcut to `schtasks.exe /run /tn DisplayFix-Restore` (the task already runs elevated). Give it a hotkey.
 - Nothing happens if the layout is already right, or if a different set of monitors is plugged in (e.g. at another desk).
 
 ### Touch screens
