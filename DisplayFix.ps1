@@ -4,19 +4,22 @@
 #   restore    put saved positions back (waits for all monitors, re-checks a few times)
 #   swap       emergency: swap the two USB screens' positions
 #   touch      re-point touch screens at their monitors (by USB port; needs admin)
-#   install    auto-run restore on wake / unlock / logon (scheduled task)
-#   uninstall  remove the scheduled task
+#   recover    after a USB display driver crash: restart each adapter left without a picture
+#   install    auto-run restore on wake / unlock / plug-in / logon, recover on driver crash
+#   uninstall  remove the scheduled tasks
 param(
-  [ValidateSet('list','save','restore','swap','touch','install','uninstall')][string]$Action = 'list',
+  [ValidateSet('list','save','restore','swap','touch','recover','install','uninstall')][string]$Action = 'list',
   [int]$WaitSec = 60,
   [switch]$Force,
-  [string]$UsbMatch = 'RTKF9D'
+  [string]$UsbMatch = 'RTKF9D',
+  [string]$AdapterMatch = 'VID_345F&PID_9133&MI_03'
 )
 $ErrorActionPreference = 'Stop'
 $Dir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Cfg  = Join-Path $Dir 'layout.json'
 $Log  = Join-Path $Dir 'displayfix.log'
 $Task = 'DisplayFix-Restore'
+$RecoverTask = 'DisplayFix-Recover'
 
 Add-Type -TypeDefinition @'
 using System; using System.Collections.Generic; using System.Runtime.InteropServices;
@@ -229,27 +232,69 @@ function Try-Restore($saved) {
   return 'fixed'
 }
 
+function Run-Restore {
+  if (-not (Test-Path $Cfg)) { Write-Log 'no layout.json - run save first'; return }
+  $json = Get-Content $Cfg -Raw | ConvertFrom-Json   # PS 5.1 emits the array as ONE object
+  $saved = @($json)
+  # USB screens come back late and Windows may reshuffle once more after they do:
+  # wait for the full set, then keep checking for ~20 s after the first fix.
+  $deadline = (Get-Date).AddSeconds($WaitSec); $settleUntil = $null; $state = 'wait'
+  while ((Get-Date) -lt $deadline) {
+    $state = Try-Restore $saved
+    if ($state -ne 'wait' -and -not $settleUntil) { $settleUntil = (Get-Date).AddSeconds(20); Repair-Touch }
+    if ($settleUntil -and (Get-Date) -gt $settleUntil) { break }
+    Start-Sleep -Seconds 4
+  }
+  if (-not $settleUntil) { Write-Log ('gave up: monitor set differs from layout.json -> ' + (Fmt (Get-Mons))) }
+  Repair-Touch
+}
+
+# ---- driver crash recovery ---------------------------------------------------
+# The MacroSilicon driver (msusbdisplaydriver.dll) crashes now and then; all its
+# screens share one UMDF host, so every USB screen drops. Windows restarts the host,
+# but a screen often stays black while its adapter still reports OK.
+# "Dead" = adapter present, but no active monitor on its port.
+function Get-DeadAdapters {
+  $script:PortCache = @{}
+  $live = @(Get-Mons | ForEach-Object { $_.Port })
+  @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like "*$AdapterMatch*" } | Where-Object {
+    $loc = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_LocationPaths -ErrorAction SilentlyContinue).Data
+    -not ($loc -and $live -contains $loc[0])
+  })
+}
+
 switch ($Action) {
   'list' {
     Get-Mons | Sort-Object X, Y | Format-Table Gdi, Name, Edid, X, Y, W, H, Port, Path -AutoSize | Out-String -Width 400 | Write-Host
   }
   'save' { Save-Layout; Save-Touch }
   'touch' { Repair-Touch }
-  'restore' {
-    if (-not (Test-Path $Cfg)) { Write-Log 'no layout.json - run save first'; exit 1 }
-    $json = Get-Content $Cfg -Raw | ConvertFrom-Json   # PS 5.1 emits the array as ONE object
-    $saved = @($json)
-    # USB screens come back late and Windows may reshuffle once more after they do:
-    # wait for the full set, then keep checking for ~20 s after the first fix.
-    $deadline = (Get-Date).AddSeconds($WaitSec); $settleUntil = $null; $state = 'wait'
-    while ((Get-Date) -lt $deadline) {
-      $state = Try-Restore $saved
-      if ($state -ne 'wait' -and -not $settleUntil) { $settleUntil = (Get-Date).AddSeconds(20); Repair-Touch }
-      if ($settleUntil -and (Get-Date) -gt $settleUntil) { break }
-      Start-Sleep -Seconds 4
+  'restore' { Run-Restore }
+  'recover' {
+    Start-Sleep -Seconds 10   # let Windows' own restart of the driver host finish
+    $dead = @(Get-DeadAdapters)
+    # our own restarts can crash the driver again: max 3 recoveries per 10 min
+    $stateF = Join-Path $Dir 'recover.json'
+    $hist = @()
+    if (Test-Path $stateF) { $hist = @(@(Get-Content $stateF -Raw | ConvertFrom-Json) | Where-Object { [datetime]$_ -gt (Get-Date).AddMinutes(-10) }) }
+    if (-not $dead.Count) {
+      Write-Log 'driver crash: all USB screens came back by themselves'
+    } elseif ($hist.Count -ge 3) {
+      Write-Log 'gave up: 3 recoveries in 10 min - unplug both USB screens, plug them in one at a time'
+    } else {
+      $hist += (Get-Date).ToString('o')
+      ConvertTo-Json -InputObject @($hist) | Set-Content -Path $stateF -Encoding UTF8
+      # one adapter at a time, and wait for its picture before the next
+      foreach ($d in $dead) {
+        $o = & pnputil.exe /restart-device "$($d.InstanceId)" 2>&1
+        Write-Log "restart $($d.InstanceId): $(($o | Out-String).Trim() -replace '\s+', ' ')"
+        $until = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $until -and @(Get-DeadAdapters | Where-Object { $_.InstanceId -eq $d.InstanceId }).Count) { Start-Sleep -Seconds 2 }
+      }
+      $left = @(Get-DeadAdapters)
+      Write-Log ("after recover: $($left.Count) adapter(s) still without a picture -> " + (Fmt (Get-Mons)))
     }
-    if (-not $settleUntil) { Write-Log ('gave up: monitor set differs from layout.json -> ' + (Fmt (Get-Mons))) }
-    Repair-Touch
+    Run-Restore
   }
   'swap' {
     $usb = @(Get-Mons | Where-Object { $_.Path -match $UsbMatch })
@@ -285,10 +330,19 @@ switch ($Action) {
     if (-not (Is-Admin)) { Write-Log 'install needs admin (touch fix writes HKLM) - run it from an admin PowerShell'; exit 1 }
     $pr = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
     Register-ScheduledTask -TaskName $Task -Action $act -Trigger @($wake, $unlock, $plug, $logon) -Settings $set -Principal $pr -Force | Out-Null
-    Write-Log "task '$Task' installed (wake + unlock + plug-in + logon)"
+    # user-mode driver crash (UMDF device offline); recover itself skips non-display devices
+    $ract = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument ("--headless powershell.exe " + ($ps -replace ' restore$', ' recover'))
+    $crash = Get-CimClass -Namespace $ns -ClassName MSFT_TaskEventTrigger | New-CimInstance -ClientOnly
+    $crash.Enabled = $true
+    $crash.Subscription = '<QueryList><Query Id="0" Path="System"><Select Path="System">' +
+      "*[System[Provider[@Name='Microsoft-Windows-DriverFrameworks-UserMode'] and EventID=10111]]" +
+      '</Select></Query></QueryList>'
+    $rset = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskName $RecoverTask -Action $ract -Trigger $crash -Settings $rset -Principal $pr -Force | Out-Null
+    Write-Log "tasks installed: '$Task' (wake + unlock + plug-in + logon), '$RecoverTask' (driver crash)"
   }
   'uninstall' {
-    Unregister-ScheduledTask -TaskName $Task -Confirm:$false
-    Write-Log "task '$Task' removed"
+    foreach ($t in $Task, $RecoverTask) { Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue }
+    Write-Log "tasks '$Task', '$RecoverTask' removed"
   }
 }

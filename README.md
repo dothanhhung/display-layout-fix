@@ -9,6 +9,7 @@ USB display adapters (DisplayLink, MacroSilicon and similar) often come back fro
 - `restore` waits up to 60 s for every saved monitor to come back, puts each one at its saved position, then keeps checking for another 20 s in case Windows moves them again.
 - `install` runs `restore` hidden whenever the PC wakes (including Modern Standby), you unlock it, a device is plugged in (Kernel-PnP event 410), or you log on.
 - Manual one-click fix without a UAC prompt: a shortcut to `schtasks.exe /run /tn DisplayFix-Restore` (the task already runs elevated). Give it a hotkey.
+- `recover` (task `DisplayFix-Recover`, runs on every user-mode driver crash, event 10111): some USB display drivers (MacroSilicon `msusbdisplaydriver.dll`) crash, and since all their screens share one driver host, every USB screen drops. Windows restarts the host, but a screen often stays black while its adapter still reports OK. `recover` waits 10 s, finds adapters (`-AdapterMatch`, default `VID_345F&PID_9133&MI_03`) with no active monitor on their port, restarts them one at a time with `pnputil /restart-device`, then runs `restore`. At most 3 recoveries per 10 min, so it can't loop.
 - Nothing happens if the layout is already right, or if a different set of monitors is plugged in (e.g. at another desk).
 
 ### Touch screens
@@ -41,7 +42,8 @@ Run `install` from an **admin** PowerShell (needed for the touch fix). To remove
 | `restore` | Fix positions now (`-Force` re-applies even if nothing changed) |
 | `swap` | Swap the positions of the two USB screens and save that as the layout |
 | `touch` | Re-point touch screens at their monitors now (admin) |
-| `install` / `uninstall` | Add / remove the scheduled task `DisplayFix-Restore` |
+| `recover` | Restart USB display adapters left without a picture after a driver crash (admin) |
+| `install` / `uninstall` | Add / remove the scheduled tasks `DisplayFix-Restore` and `DisplayFix-Recover` |
 
 `swap` finds the USB screens by a device-path pattern, `-UsbMatch` (default `RTKF9D`). Run `list` to see yours and pass your own, e.g. `-UsbMatch DisplayLink`.
 
@@ -52,6 +54,7 @@ Every fix writes the positions before and after to `displayfix.log`.
 - Two screens on the same port (one adapter with two outputs) can't be told apart by port; they fall back to device path / EDID.
 - Manual fallback: `swap` swaps the two USB screens **and saves the result**. Tip: put a shortcut to `conhost.exe --headless powershell.exe -ExecutionPolicy Bypass -File DisplayFix.ps1 swap` on the desktop and give it a hotkey.
 - Only positions are restored, not resolution, scaling or rotation.
+- `recover` works around driver crashes; it doesn't stop them. A newer driver is the real fix.
 
 ## License
 MIT
