@@ -11,7 +11,9 @@ USB display adapters (DisplayLink, MacroSilicon and similar) often come back fro
 - Nothing happens if the layout is already right, or if a different set of monitors is plugged in (e.g. at another desk).
 
 ## How it works
-It calls the Windows CCD API (`QueryDisplayConfig` / `SetDisplayConfig`) through a small embedded C# class. Each active display path is matched to the saved layout by its monitor device path (unique per monitor and port), falling back to the EDID manufacturer + product code when that is unique. The new positions are applied with `SDC_SAVE_TO_DATABASE`, so Windows keeps them.
+It calls the Windows CCD API (`QueryDisplayConfig` / `SetDisplayConfig`) through a small embedded C# class. Each active display is matched to the saved layout by the **physical location of its parent device** (the USB port, e.g. `USBROOT(0)#USB(3)#USB(1)`), then by monitor device path, then by EDID manufacturer + product code.
+
+The port comes first because some USB display drivers (seen with MacroSilicon `VID_345F`) hand out the monitors' EDID ids and UIDs in wake-up order. After a wake, "monitor F9D0" can be on the other adapter, and Windows, which remembers positions by EDID, puts it in the other screen's place. The USB port never moves. The new positions are applied with `SDC_SAVE_TO_DATABASE`, so Windows keeps them.
 
 ## Install
 1. Download `DisplayFix.ps1` into a folder of its own (it writes `layout.json` and `displayfix.log` next to itself).
@@ -37,7 +39,9 @@ No admin rights needed. To remove the automatic task: `DisplayFix.ps1 uninstall`
 Every fix writes the positions before and after to `displayfix.log`.
 
 ## Limits
-- Some USB display drivers (seen with MacroSilicon `VID_345F`) hand out their outputs in wake-up order. Then the monitor IDs swap along with the pictures, and nothing Windows reports can tell which physical screen is which. `restore` sees a correct layout and does nothing. Use `swap`: it swaps the two USB screens **and saves the result**, so the next `restore` keeps it. Tip: put a shortcut to `conhost.exe --headless powershell.exe -ExecutionPolicy Bypass -File DisplayFix.ps1 swap` on the desktop and give it a hotkey.
+- Moving a USB screen to a different port changes its identity: arrange the screens and run `save` again.
+- Two screens on the same port (one adapter with two outputs) can't be told apart by port; they fall back to device path / EDID.
+- Manual fallback: `swap` swaps the two USB screens **and saves the result**. Tip: put a shortcut to `conhost.exe --headless powershell.exe -ExecutionPolicy Bypass -File DisplayFix.ps1 swap` on the desktop and give it a hotkey.
 - Only positions are restored, not resolution, scaling or rotation.
 
 ## License

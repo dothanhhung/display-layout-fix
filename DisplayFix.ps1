@@ -87,19 +87,49 @@ function Write-Log($msg) {
   Write-Host $msg
   if ((Get-Item $Log).Length -gt 200KB) { Get-Content $Log -Tail 500 | Set-Content $Log }
 }
-function Get-Mons { [DispFix]::Get() | Where-Object { $_.W -gt 0 } }
+# Physical location of the monitor's parent device (USB port for USB adapters).
+# USB display drivers (MacroSilicon) hand out EDID ids and UIDs in wake-up order,
+# so after a wake "F9D0" can sit on the other adapter - only the port is stable.
+$PortCache = @{}
+function Get-Port($path) {
+  if ($PortCache.ContainsKey($path)) { return $PortCache[$path] }
+  $port = ''
+  if ($path -match '^\\\\\?\\DISPLAY#([^#]+)#([^#]+)#') {
+    $inst = "DISPLAY\$($Matches[1])\$($Matches[2])"
+    try {
+      $parent = (Get-PnpDeviceProperty -InstanceId $inst -KeyName DEVPKEY_Device_Parent -ErrorAction Stop).Data
+      $loc = (Get-PnpDeviceProperty -InstanceId $parent -KeyName DEVPKEY_Device_LocationPaths -ErrorAction Stop).Data
+      if ($loc) { $port = $loc[0] }
+    } catch {}
+  }
+  $PortCache[$path] = $port
+  return $port
+}
+function Get-Mons {
+  [DispFix]::Get() | Where-Object { $_.W -gt 0 } |
+    ForEach-Object { $_ | Add-Member -NotePropertyName Port -NotePropertyValue (Get-Port $_.Path) -PassThru }
+}
 function Save-Layout {
   $mons = @(Get-Mons)
-  $mons | Select-Object Name, Edid, Path, X, Y | ConvertTo-Json | Set-Content -Path $Cfg -Encoding UTF8
+  $mons | Select-Object Name, Edid, Port, Path, X, Y | ConvertTo-Json | Set-Content -Path $Cfg -Encoding UTF8
   Write-Log ('saved: ' + (Fmt $mons))
 }
-function Fmt($mons) { ($mons | Sort-Object X, Y | ForEach-Object { '{0}({1}) @{2},{3}' -f $_.Gdi, $_.Edid, $_.X, $_.Y }) -join ' | ' }
+function Fmt($mons) {
+  ($mons | Sort-Object X, Y | ForEach-Object {
+    $usb = if ($_.Port -match 'USBROOT\(0\)#(.+)#USBMI') { ' ' + $Matches[1] } else { '' }
+    '{0}({1}{2}) @{3},{4}' -f $_.Gdi, $_.Edid, $usb, $_.X, $_.Y }) -join ' | '
+}
 
-# saved entry -> current monitor: exact device path first, else unique EDID id
+# saved entry -> current monitor: unique USB port first, then exact device path,
+# then unique EDID id (the port is the only key that survives a driver reshuffle)
 function Match-Layout($saved, $cur) {
   $map = @{}
   foreach ($s in $saved) {
-    $m = @($cur | Where-Object { $_.Path -eq $s.Path })
+    $m = @()
+    if ($s.Port -and @($saved | Where-Object { $_.Port -eq $s.Port }).Count -eq 1) {
+      $m = @($cur | Where-Object { $_.Port -eq $s.Port })
+    }
+    if ($m.Count -ne 1) { $m = @($cur | Where-Object { $_.Path -eq $s.Path }) }
     if ($m.Count -ne 1) {
       $sameSaved = @($saved | Where-Object { $_.Edid -eq $s.Edid })
       $m = @($cur | Where-Object { $_.Edid -eq $s.Edid })
@@ -134,7 +164,7 @@ function Try-Restore($saved) {
 
 switch ($Action) {
   'list' {
-    Get-Mons | Sort-Object X, Y | Format-Table Gdi, Name, Edid, X, Y, W, H, Path -AutoSize | Out-String -Width 300 | Write-Host
+    Get-Mons | Sort-Object X, Y | Format-Table Gdi, Name, Edid, X, Y, W, H, Port, Path -AutoSize | Out-String -Width 400 | Write-Host
   }
   'save' { Save-Layout }
   'restore' {
