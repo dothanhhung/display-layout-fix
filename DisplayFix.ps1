@@ -88,6 +88,11 @@ function Write-Log($msg) {
   if ((Get-Item $Log).Length -gt 200KB) { Get-Content $Log -Tail 500 | Set-Content $Log }
 }
 function Get-Mons { [DispFix]::Get() | Where-Object { $_.W -gt 0 } }
+function Save-Layout {
+  $mons = @(Get-Mons)
+  $mons | Select-Object Name, Edid, Path, X, Y | ConvertTo-Json | Set-Content -Path $Cfg -Encoding UTF8
+  Write-Log ('saved: ' + (Fmt $mons))
+}
 function Fmt($mons) { ($mons | Sort-Object X, Y | ForEach-Object { '{0}({1}) @{2},{3}' -f $_.Gdi, $_.Edid, $_.X, $_.Y }) -join ' | ' }
 
 # saved entry -> current monitor: exact device path first, else unique EDID id
@@ -131,11 +136,7 @@ switch ($Action) {
   'list' {
     Get-Mons | Sort-Object X, Y | Format-Table Gdi, Name, Edid, X, Y, W, H, Path -AutoSize | Out-String -Width 300 | Write-Host
   }
-  'save' {
-    $mons = @(Get-Mons)
-    $mons | Select-Object Name, Edid, Path, X, Y | ConvertTo-Json | Set-Content -Path $Cfg -Encoding UTF8
-    Write-Log ('saved: ' + (Fmt $mons))
-  }
+  'save' { Save-Layout }
   'restore' {
     if (-not (Test-Path $Cfg)) { Write-Log 'no layout.json - run save first'; exit 1 }
     $json = Get-Content $Cfg -Raw | ConvertFrom-Json   # PS 5.1 emits the array as ONE object
@@ -157,6 +158,9 @@ switch ($Action) {
     Write-Log ('before: ' + (Fmt (Get-Mons)))
     $r = [DispFix]::Apply([int[]]@($usb[0].Idx, $usb[1].Idx), [int[]]@($usb[1].X, $usb[0].X), [int[]]@($usb[1].Y, $usb[0].Y))
     Write-Log ("SetDisplayConfig=$r  after: " + (Fmt (Get-Mons)))
+    # The USB driver can swap which monitor ID drives which physical screen, so a
+    # manual swap is the new truth - save it, or the next restore would undo it.
+    if ($r -eq 0) { Save-Layout }
   }
   'install' {
     $ps = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" restore"

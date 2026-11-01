@@ -29,7 +29,7 @@ No admin rights needed. To remove the automatic task: `DisplayFix.ps1 uninstall`
 | `list` | Show current monitors, IDs and positions |
 | `save` | Remember the current layout as the correct one |
 | `restore` | Fix positions now (`-Force` re-applies even if nothing changed) |
-| `swap` | Swap the positions of the two USB screens (manual fallback) |
+| `swap` | Swap the positions of the two USB screens and save that as the layout |
 | `install` / `uninstall` | Add / remove the scheduled task `DisplayFix-Restore` |
 
 `swap` finds the USB screens by a device-path pattern, `-UsbMatch` (default `RTKF9D`). Run `list` to see yours and pass your own, e.g. `-UsbMatch DisplayLink`.
@@ -37,7 +37,7 @@ No admin rights needed. To remove the automatic task: `DisplayFix.ps1 uninstall`
 Every fix writes the positions before and after to `displayfix.log`.
 
 ## Limits
-- If both USB screens report the exact same EDID **and** come back on swapped device paths, the script can't tell them apart. Use `swap`.
+- Some USB display drivers (seen with MacroSilicon `VID_345F`) hand out their outputs in wake-up order. Then the monitor IDs swap along with the pictures, and nothing Windows reports can tell which physical screen is which. `restore` sees a correct layout and does nothing. Use `swap`: it swaps the two USB screens **and saves the result**, so the next `restore` keeps it. Tip: put a shortcut to `conhost.exe --headless powershell.exe -ExecutionPolicy Bypass -File DisplayFix.ps1 swap` on the desktop and give it a hotkey.
 - Only positions are restored, not resolution, scaling or rotation.
 
 ## License
